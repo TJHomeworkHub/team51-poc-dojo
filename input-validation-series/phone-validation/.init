@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+
+chmod 0444 "/challenge/backup/appointment_api.py" 2>/dev/null || true
+chmod 0777 "/challenge/validators.py" 2>/dev/null || true
+chmod 4711 "/challenge/checker" 2>/dev/null || true
+
+rm -f "/challenge/.init" 2>/dev/null || true

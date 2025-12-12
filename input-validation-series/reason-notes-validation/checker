@@ -1,0 +1,224 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+import requests
+from pathlib import Path
+from datetime import date, timedelta
+
+ROOT = Path("/challenge")
+APP = ROOT / "appointment_api.py"
+FLAG = Path("/flag")
+BASE = "http://127.0.0.1:5000"
+START_TIMEOUT = 8.0
+
+
+def start_server() -> subprocess.Popen:
+    proc = subprocess.Popen([sys.executable, str(APP)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{BASE}/", timeout=1.0)
+            if r.status_code == 200:
+                return proc
+        except requests.RequestException:
+            pass
+        time.sleep(0.2)
+    out, err = proc.communicate(timeout=1)
+    print("Server failed to start. stdout:\n", out.decode(errors="ignore"))
+    print("stderr:\n", err.decode(errors="ignore"))
+    proc.kill()
+    raise RuntimeError("Server failed to start")
+
+
+def stop_server(proc: subprocess.Popen):
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def post_appointment(payload: dict) -> requests.Response:
+    return requests.post(f"{BASE}/api/appointments", json=payload, timeout=5.0)
+
+
+def run_basic_success_flow():
+    payload = {
+        "patient_name": "Valid Name",
+        "patient_email": "valid@example.com",
+        "phone_number": "555-000-1111",
+        "appointment_date": (date.today() + timedelta(days=45)).isoformat(),
+        "appointment_time": "09:00",
+        "reason": "Annual physical examination",
+        "notes": "Patient prefers morning appointments."
+    }
+    r = post_appointment(payload)
+    if r.status_code != 201:
+        print("Basic flow failed: expected 201. Status:", r.status_code, "Body:", r.text)
+        return False
+    try:
+        j = r.json()
+    except ValueError:
+        print("Basic flow failed: response not JSON:", r.text)
+        return False
+    if "id" not in j:
+        print("Basic flow failed: missing id in response:", j)
+        return False
+    return True
+
+
+def test_reason_validation():
+    base = {
+        "patient_name": "Valid Name",
+        "patient_email": "reasontester@example.com",
+        "phone_number": "555-111-2222",
+        "appointment_date": (date.today() + timedelta(days=45)).isoformat(),
+        "appointment_time": "10:00",
+    }
+
+    valid_reasons = [
+        "Annual physical examination",
+        "Follow-up for flu symptoms",
+        "Consultation (possible allergy)",
+    ]
+
+    invalid_reasons = [
+        ("short", "too short"),
+        ("A" * 250, "too long"),
+        ("Checkup' OR '1'='1", "SQL tautology"),
+        ("<script>alert('xss')</script>", "xss injection"),
+        ("Normal -- DROP TABLE appointments;", "sql marker with dash and semicolon"),
+        ("Reason with ;; multiple semicolons", "suspicious punctuation sequence"),
+    ]
+
+    for reason in valid_reasons:
+        payload = {**base, "reason": reason}
+        r = post_appointment(payload)
+        if r.status_code != 201:
+            print(f"FAILED: valid reason was rejected: {reason!r} -> status {r.status_code}, body: {r.text}")
+            return False
+
+    for reason, why in invalid_reasons:
+        payload = {**base, "reason": reason}
+        r = post_appointment(payload)
+        if r.status_code != 400:
+            print(f"FAILED: invalid reason {reason!r} ({why}) was accepted (status {r.status_code}): {r.text}")
+            return False
+
+        try:
+            j = r.json()
+            err = j.get("error", "")
+            if not err or "traceback" in err.lower() or "exception" in err.lower():
+                print(f"FAILED: error message for reason {reason!r} missing or leaking internals: {j}")
+                return False
+        except ValueError:
+            print(f"FAILED: rejection for reason {reason!r} didn't return JSON: {r.text}")
+            return False
+
+    return True
+
+
+def test_notes_validation():
+    base = {
+        "patient_name": "Valid Name",
+        "patient_email": "notestester@example.com",
+        "phone_number": "555-333-4444",
+        "appointment_date": (date.today() + timedelta(days=45)).isoformat(),
+        "appointment_time": "11:00",
+        "reason": "Valid reason for visit"
+    }
+
+    valid_notes = [
+        None,
+        "",
+        "Patient reports improvement since last visit.",
+        "A" * 400
+    ]
+
+    invalid_notes = [
+        ("<script>alert('xss')</script>", "xss"),
+        ("A" * 600, "too long"),
+        ("Normal note -- DROP TABLE", "sql marker")
+    ]
+
+    for notes in valid_notes:
+        payload = dict(base)
+        if notes is None:
+            payload.pop("notes", None)
+        else:
+            payload["notes"] = notes
+        r = post_appointment(payload)
+        if r.status_code != 201:
+            print(f"FAILED: valid notes {notes!r} was rejected (status {r.status_code}) body: {r.text}")
+            return False
+
+    for notes, why in invalid_notes:
+        payload = dict(base)
+        payload["notes"] = notes
+        r = post_appointment(payload)
+        if r.status_code != 400:
+            print(f"FAILED: invalid notes {notes!r} ({why}) was accepted (status {r.status_code}): {r.text}")
+            return False
+        try:
+            j = r.json()
+            err = j.get("error", "")
+            if not err or "traceback" in err.lower() or "exception" in err.lower():
+                print(f"FAILED: error message for notes {notes!r} missing or leaking internals: {j}")
+                return False
+        except ValueError:
+            print(f"FAILED: rejection for notes {notes!r} didn't return JSON: {r.text}")
+            return False
+
+    return True
+
+
+def main():
+    proc = None
+    try:
+        proc = start_server()
+        if not run_basic_success_flow():
+            print("[FAIL] basic functionality failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        if not test_reason_validation():
+            print("[FAIL] reason validation tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        if not test_notes_validation():
+            print("[FAIL] notes validation tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        if FLAG.exists():
+            print("[SUCCESS] All tests passed!")
+            print("[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            stop_server(proc)
+            sys.exit(0)
+        else:
+            print("[WARN] All tests passed but flag missing")
+            stop_server(proc)
+            sys.exit(1)
+
+    except Exception as exc:
+        print("Exception during check:", exc)
+        if proc:
+            stop_server(proc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

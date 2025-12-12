@@ -1,0 +1,177 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+import requests
+import os
+from pathlib import Path
+from datetime import date, timedelta
+
+ROOT = Path("/challenge")
+APP = ROOT / "appointment_api.py"
+FLAG = Path("/flag")
+SERVER = "http://127.0.0.1:5000"
+START_TIMEOUT = 8.0  # seconds
+
+
+def start_server() -> subprocess.Popen:
+    proc = subprocess.Popen([sys.executable, str(APP)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{SERVER}/", timeout=1.0)
+            if r.status_code == 200:
+                return proc
+        except requests.RequestException:
+            pass
+        time.sleep(0.2)
+
+    try:
+        out, err = proc.communicate(timeout=1)
+    except Exception:
+        out, err = b"", b""
+    print("Server failed to start. stdout:\n", out.decode(errors="ignore"))
+    print("stderr:\n", err.decode(errors="ignore"))
+    proc.kill()
+    raise RuntimeError("Server did not become ready")
+
+
+def stop_server(proc: subprocess.Popen):
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def create_appointment(payload: dict) -> requests.Response:
+    return requests.post(f"{SERVER}/api/appointments", json=payload, timeout=5.0)
+
+
+def run_basic_flow():
+    payload = {
+        "patient_name": "Test User",
+        "patient_email": "testuser@example.com",
+        "phone_number": "555-101-2020",
+        "appointment_date": (date.today() + timedelta(days=45)).isoformat(),
+        "appointment_time": "09:00",
+        "reason": "Routine checkup"
+    }
+    r = create_appointment(payload)
+    if r.status_code != 201:
+        print("Basic flow failed: expected 201 for valid appointment. Status:", r.status_code, "Body:", r.text)
+        return False
+    try:
+        data = r.json()
+    except ValueError:
+        print("Basic flow failed: response not JSON:", r.text)
+        return False
+    if "id" not in data:
+        print("Basic flow failed: missing id in response:", data)
+        return False
+    return True
+
+
+def test_time_validation():
+    """Test accept/reject cases for appointment_time per spec."""
+    base = {
+        "patient_name": "Valid Name",
+        "patient_email": "timecheck@example.com",
+        "phone_number": "555-202-3030",
+        "appointment_date": (date.today() + timedelta(days=45)).isoformat(),
+        "reason": "Time validation test"
+    }
+
+    valid_times = [
+        "09:00",
+        "14:30",
+        "17:45",
+        "08:00",
+        "17:59",
+    ]
+
+    invalid_times = [
+        ("9:00", "hour not two-digit"),
+        ("9:30 AM", "contains AM/PM"),
+        ("25:00", "hour out of range"),
+        ("12:60", "minute out of range"),
+        ("07:59", "before business hours"),
+        ("18:00", "at/after closing"),
+        ("18:30", "after business hours"),
+        ("09:00<script>", "xss/script content"),
+        ("09:00+00:00", "tz offset not allowed"),
+        ("", "empty string"),
+        (None, "null value"),
+    ]
+
+    for t in valid_times:
+        payload = {**base, "appointment_time": t}
+        r = create_appointment(payload)
+        if r.status_code != 201:
+            print(f"FAILED: valid time '{t}' rejected (status {r.status_code}): {r.text}")
+            return False
+
+    for t, reason in invalid_times:
+        payload = {**base, "appointment_time": t}
+        r = create_appointment(payload)
+        if r.status_code != 400:
+            print(f"FAILED: invalid time '{t}' ({reason}) accepted (status {r.status_code}). Body: {r.text}")
+            return False
+
+        try:
+            j = r.json()
+            err = j.get("error", "")
+            if not err or "traceback" in err.lower() or "exception" in err.lower():
+                print(f"FAILED: error message for '{t}' is missing or leaks internals: {j}")
+                return False
+        except ValueError:
+            print(f"FAILED: rejection for '{t}' did not return JSON body: {r.text}")
+            return False
+
+    return True
+
+
+def main():
+    proc = None
+    try:
+        proc = start_server()
+        if not run_basic_flow():
+            print("[FAIL] basic functionality broken")
+            stop_server(proc)
+            sys.exit(1)
+
+        if not test_time_validation():
+            print("[FAIL] appointment_time validation tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        if FLAG.exists():
+            print("[SUCCESS] All tests passed!")
+            print("[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            stop_server(proc)
+            sys.exit(0)
+        else:
+            print("[WARN] All tests passed but flag file missing.")
+            stop_server(proc)
+            sys.exit(1)
+
+    except Exception as exc:
+        print("Exception during check:", exc)
+        if proc:
+            stop_server(proc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,170 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+import requests
+import os
+from pathlib import Path
+from datetime import date, timedelta
+
+ROOT = Path("/challenge")
+APP = ROOT / "appointment_api.py"
+FLAG = Path("/flag")
+SERVER_URL = "http://127.0.0.1:5000"
+START_TIMEOUT = 8.0  # seconds
+
+
+def start_server():
+    proc = subprocess.Popen([sys.executable, str(APP)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{SERVER_URL}/", timeout=1.0)
+            if r.status_code == 200:
+                return proc
+        except requests.RequestException:
+            pass
+        time.sleep(0.2)
+    proc.kill()
+    stdout, stderr = proc.communicate(timeout=1)
+    print("Server failed to start. stdout/stderr:\n", stdout.decode(errors="ignore"), stderr.decode(errors="ignore"))
+    raise RuntimeError("Server failed to start")
+
+
+def stop_server(proc: subprocess.Popen):
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def create_appointment(payload: dict) -> requests.Response:
+    return requests.post(f"{SERVER_URL}/api/appointments", json=payload, timeout=5.0)
+
+
+def run_tests():
+    base = {
+        "patient_name": "John O'Brien",
+        "patient_email": "john@example.com",
+        "phone_number": "555-123-4567",
+        "appointment_time": "11:00",
+        "reason": "Routine check"
+    }
+
+    today = date.today()
+    valid_date = (today + timedelta(days=10)).isoformat()
+    edge_valid = (today + timedelta(days=90)).isoformat()
+    past_date = (today - timedelta(days=1)).isoformat()
+    far_future = (today + timedelta(days=91)).isoformat()
+
+    bad_formats = [
+        "12/25/2025",
+        "2025-13-01",
+        "2025-02-30",
+        "2025-01-01; DROP TABLE",
+        " 2025-01-01 ",
+    ]
+
+    payload = {**base, "appointment_date": valid_date}
+    r = create_appointment(payload)
+    if r.status_code != 201:
+        print(f"FAILED: valid future date {valid_date} was rejected: {r.status_code} {r.text}")
+        return False
+
+    payload = {**base, "appointment_date": edge_valid}
+    r = create_appointment(payload)
+    if r.status_code != 201:
+        print(f"FAILED: edge valid date {edge_valid} (90 days) was rejected: {r.status_code} {r.text}")
+        return False
+
+    payload = {**base, "appointment_date": past_date}
+    r = create_appointment(payload)
+    if r.status_code != 400:
+        print(f"FAILED: past date {past_date} should be rejected but was accepted: {r.status_code}")
+        return False
+
+    payload = {**base, "appointment_date": far_future}
+    r = create_appointment(payload)
+    if r.status_code != 400:
+        print(f"FAILED: far future date {far_future} (>90 days) should be rejected but was accepted: {r.status_code}")
+        return False
+
+    for bad in bad_formats:
+        payload = {**base, "appointment_date": bad}
+        r = create_appointment(payload)
+        if bad.strip() == bad and bad in ("12/25/2025", "2025-13-01", "2025-02-30", "2025-01-01; DROP TABLE"):
+            expected_status = 400
+        else:
+            trimmed = bad.strip()
+            try:
+                y, m, d = trimmed.split("-")
+                candidate = date(int(y), int(m), int(d))
+                if candidate > today and (candidate - today).days <= 90:
+                    expected_status = 201
+                else:
+                    expected_status = 400
+            except Exception:
+                expected_status = 400
+
+        if r.status_code != expected_status:
+            print(f"FAILED: malformed test '{bad}' expected {expected_status} got {r.status_code}: {r.text}")
+            return False
+
+    payload = {**base, "appointment_date": "not-a-date"}
+    r = create_appointment(payload)
+    if r.status_code != 400:
+        print("FAILED: 'not-a-date' should be rejected")
+        return False
+    try:
+        j = r.json()
+        err = j.get("error", "")
+        if not err or "traceback" in err.lower() or "exception" in err.lower():
+            print("FAILED: Error message missing or leaking internals:", j)
+            return False
+    except ValueError:
+        print("FAILED: Non-JSON response for invalid date:", r.text)
+        return False
+
+    return True
+
+
+def main():
+    proc = None
+    try:
+        proc = start_server()
+        ok = run_tests()
+        if not ok:
+            print("[FAIL] Date validation tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        if FLAG.exists():
+            print("[SUCCESS] All tests passed!")
+            print("[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            stop_server(proc)
+            sys.exit(0)
+        else:
+            print("[WARN] All tests passed but flag file missing")
+            stop_server(proc)
+            sys.exit(1)
+    except Exception as e:
+        print("Exception during checking:", e)
+        if proc:
+            stop_server(proc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

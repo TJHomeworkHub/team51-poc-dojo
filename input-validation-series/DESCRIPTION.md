@@ -1,0 +1,1 @@
+This module contains a sequence of focused challenges teaching robust input validation for a patient appointment scheduling API. Each challenge isolates one validation requirement so learners can practice incrementally before applying a full patch in the integration challenge.

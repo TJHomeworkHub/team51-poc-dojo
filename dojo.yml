@@ -1,0 +1,91 @@
+id: team51-poc-dojo
+name: Team 51 PoC Dojo
+type: training
+image: pwncollege/challenge-legacy:latest
+
+modules:
+  - id: input-validation-series
+    name: Input Validation Series
+    description: >
+      
+      #### BACKGROUND
+      
+      Welcome to SecureHealth's Security Engineering Training Program!
+      
+      
+      SecureHealth is a fast-growing healthcare technology startup that provides
+      a patient appointment scheduling platform used by over 200 medical practices
+      across the country. After a recent security audit, the engineering team
+      discovered that the appointment API lacks proper input validation, making
+      it vulnerable to injection attacks and malformed data that could compromise
+      patient privacy and system stability.
+      
+      
+      #### YOUR ROLE
+      
+      You've just joined SecureHealth as a junior security engineer, and your
+      first assignment is as follows. The appointment-scheduling API is heading
+      toward production, but a recent audit revealed that several input fields
+      are still vulnerable to malformed data and injection attacks. To ensure the
+      system is secure and reliable, the security team has broken the remediation
+      work into a sequence of focused tasks, each targeting a specific input field
+      that must be validated before release.
+      
+      
+      #### THE VULNERABILITY
+      
+      The current API accepts user inputs without validation, creating multiple
+      security risks:
+        - SQL Injection: Attackers could manipulate database queries to access
+        or modify unauthorized data
+        - Cross-Site Scripting (XSS): Malicious scripts could be injected and
+        executed in users' browsers
+        - Data Integrity Issues: Malformed inputs could crash the system or
+        corrupt appointment records
+        - HIPAA Compliance Violations: Inadequate input controls could expose
+        protected health information
+      
+      
+      #### YOUR MISSION
+      
+      Implement defensive input validation to protect each API endpoint.
+      Your validation must:
+        1. REJECT malicious inputs that could be used for attacks
+        2. ACCEPT all legitimate appointment data
+        3. MAINTAIN existing functionality so don't break what works!
+        4. PROVIDE clear error messages when validation fails
+      
+      
+      Each challenge in this series focuses on validating a specific input field.
+      As you progress, you'll build a complete validation layer that secures the
+      entire API.
+      
+      
+      #### LEARNING RESOURCES
+      
+      If you're new to input validation, review these resources:
+        - [OWASP Input Validation Cheat Sheet]( https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html)
+        - [Getting Defensive with Coding - Validating Input](https://blog.securityinnovation.com/blog/2013/11/getting-defensive-with-coding-validating-input.html)
+        - [The Essential Guide to Input Validation](https://www.aptori.com/blog/the-essential-guide-to-input-validation-for-secure-software)
+        - [Flask-WTF Tutorial](https://www.digitalocean.com/community/tutorials/how-to-use-and-validate-web-forms-with-flask-wtf)
+    challenges:
+      - id: patient-name-validation
+        name: Patient Name Validation
+        
+      - id: email-validation
+        name: Email Address Validation
+        
+      - id: phone-validation
+        name: Phone Number Validation
+        
+      - id: date-validation
+        name: Appointment Date Validation
+        
+      - id: time-validation
+        name: Appointment Time Validation
+        
+      - id: reason-notes-validation
+        name: Reason & Notes Validation
+        
+      - id: api-security-integration
+        name: API Security Integration

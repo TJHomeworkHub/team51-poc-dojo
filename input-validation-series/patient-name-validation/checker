@@ -1,0 +1,211 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+import requests
+import os
+from pathlib import Path
+
+ROOT = Path("/challenge")
+APP = ROOT / "appointment_api.py"
+FLAG = Path("/flag")
+SERVER_URL = "http://127.0.0.1:5000"
+START_TIMEOUT = 8.0  # seconds
+
+
+def start_server():
+    # Start the Flask app as a subprocess
+    proc = subprocess.Popen([sys.executable, str(APP)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Wait for readiness
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{SERVER_URL}/", timeout=1.0)
+            if r.status_code == 200:
+                return proc
+        except requests.RequestException:
+            pass
+        time.sleep(0.2)
+    # If we reach here the server failed to start
+    proc.kill()
+    stdout, stderr = proc.communicate(timeout=1)
+    print("Server failed to start. stdout/stderr:\n", stdout.decode(errors="ignore"), stderr.decode(errors="ignore"))
+    raise RuntimeError("Server failed to start")
+
+
+def stop_server(proc: subprocess.Popen):
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+# --- Helpers ---------------------------------------------------------------
+def create_appointment(payload: dict) -> requests.Response:
+    return requests.post(f"{SERVER_URL}/api/appointments", json=payload, timeout=5.0)
+
+
+def get_appointment(aid: int) -> requests.Response:
+    return requests.get(f"{SERVER_URL}/api/appointments/{aid}", timeout=5.0)
+
+
+def search_appointments(name: str) -> requests.Response:
+    return requests.get(f"{SERVER_URL}/api/appointments/search", params={"name": name}, timeout=5.0)
+
+
+def add_notes(aid: int, notes: str) -> requests.Response:
+    return requests.post(f"{SERVER_URL}/api/appointments/{aid}/notes", json={"notes": notes}, timeout=5.0)
+
+
+# --- Tests ---------------------------------------------------------------
+def test_existing_functionality():
+    # Valid payload (patient_name is valid)
+    payload = {
+        "patient_name": "John O'Brien",
+        "patient_email": "john@example.com",
+        "phone_number": "555-123-4567",
+        "appointment_date": "2099-12-31",
+        "appointment_time": "10:00",
+        "reason": "Annual checkup appointment"
+    }
+    r = create_appointment(payload)
+    if r.status_code != 201:
+        print("FAILED: creating valid appointment should return 201, got:", r.status_code, r.text)
+        return False
+    data = r.json()
+    appt_id = data.get("id")
+    if not isinstance(appt_id, int):
+        print("FAILED: response id missing or not int:", data)
+        return False
+
+    # Retrieve by ID
+    r = get_appointment(appt_id)
+    if r.status_code != 200:
+        print("FAILED: retrieving appointment should return 200, got:", r.status_code, r.text)
+        return False
+    obj = r.json()
+    if obj.get("patient_name") != payload["patient_name"].strip():
+        print("FAILED: retrieved patient_name mismatch:", obj.get("patient_name"))
+        return False
+
+    # Search by name (substring)
+    r = search_appointments("John")
+    if r.status_code != 200:
+        print("FAILED: search should return 200, got:", r.status_code, r.text)
+        return False
+    results = r.json().get("results", [])
+    if not any(item.get("id") == appt_id for item in results):
+        print("FAILED: search results do not include created appointment")
+        return False
+
+    # Add notes
+    r = add_notes(appt_id, "Patient prefers morning times.")
+    if r.status_code != 200:
+        print("FAILED: adding notes should return 200, got:", r.status_code, r.text)
+        return False
+    note_payload = r.json()
+    if note_payload.get("notes") != "Patient prefers morning times.":
+        print("FAILED: notes content mismatch")
+        return False
+
+    return True
+
+
+def test_patient_name_validation():
+    valid_accept = [
+        "John O'Brien",
+        "Mary-Jane Smith",
+    ]
+    invalid_reject = [
+        ("a", "too short"),
+        ("A" * 60, "too long"),
+        ("; DROP TABLE appointments--", "sql injection pattern"),
+        ("<script>alert('xss')</script>", "xss pattern"),
+    ]
+
+    base = {
+        "patient_email": "tester@example.com",
+        "phone_number": "555-222-3333",
+        "appointment_date": "2099-12-01",
+        "appointment_time": "11:00",
+        "reason": "Testing name validation"
+    }
+
+    # Accept valid names
+    for name in valid_accept:
+        payload = {**base, "patient_name": name}
+        r = create_appointment(payload)
+        if r.status_code != 201:
+            print(f"FAILED: valid name '{name}' was rejected (status {r.status_code}) - {r.text}")
+            return False
+
+    # Reject invalid names
+    for name, reason in invalid_reject:
+        payload = {**base, "patient_name": name}
+        r = create_appointment(payload)
+        if r.status_code != 400:
+            print(f"FAILED: invalid name '{name}' ({reason}) was accepted (status {r.status_code})")
+            return False
+        # Ensure error message is user-facing and not revealing internals
+        try:
+            j = r.json()
+            err = j.get("error", "")
+            if not err or "traceback" in err.lower() or "exception" in err.lower():
+                print(f"FAILED: error message for '{name}' is missing or leaking internals: {j}")
+                return False
+        except ValueError:
+            print(f"FAILED: invalid response body for rejected name '{name}': {r.text}")
+            return False
+
+    return True
+
+
+# --- Runner ---------------------------------------------------------------
+def main():
+    proc = None
+    try:
+        proc = start_server()
+        ok = test_existing_functionality()
+        if not ok:
+            print("[FAIL] Existing functionality tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        ok = test_patient_name_validation()
+        if not ok:
+            print("[FAIL] Patient name validation tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        # All tests passed
+        if FLAG.exists():
+            print("[SUCCESS] All tests passed!")
+            print("[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            stop_server(proc)
+            sys.exit(0)
+        else:
+            print("[WARN] All tests passed but flag file missing")
+            stop_server(proc)
+            sys.exit(1)
+
+    except Exception as e:
+        print("Exception during checking:", e)
+        if proc:
+            stop_server(proc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,16 @@
+name: Input Validation Series
+challenges:
+  - id: patient-name-validation
+    name: Patient Name Validation
+  - id: email-validation
+    name: Email Address Validation
+  - id: phone-validation
+    name: Phone Number Validation
+  - id: date-validation
+    name: Appointment Date Validation
+  - id: time-validation
+    name: Appointment Time Validation
+  - id: reason-notes-validation
+    name: Reason & Notes Validation
+  - id: api-security-integration
+    name: API Security Integration

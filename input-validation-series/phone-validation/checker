@@ -1,0 +1,390 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+import requests
+from pathlib import Path
+
+ROOT = Path("/challenge")
+APP = ROOT / "appointment_api.py"
+FLAG = Path("/flag")
+SERVER_URL = "http://127.0.0.1:5000"
+START_TIMEOUT = 8.0  # seconds
+
+
+def start_server():
+    proc = subprocess.Popen(
+        [sys.executable, str(APP)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{SERVER_URL}/", timeout=1.0)
+            if r.status_code == 200:
+                return proc
+        except requests.RequestException:
+            pass
+        time.sleep(0.2)
+
+    proc.kill()
+    stdout, stderr = proc.communicate(timeout=1)
+    print("Server failed to start. stdout/stderr:\n",
+          stdout.decode(errors="ignore"),
+          stderr.decode(errors="ignore"))
+    raise RuntimeError("Server failed to start")
+
+
+def stop_server(proc: subprocess.Popen):
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def create_appointment(payload: dict) -> requests.Response:
+    return requests.post(
+        f"{SERVER_URL}/api/appointments",
+        json=payload,
+        timeout=5.0
+    )
+
+
+def test_existing_functionality():
+    print("\n[TEST] Existing Functionality - Valid Phone Numbers")
+
+    valid_payloads = [
+        {
+            "patient_name": "John Smith",
+            "patient_email": "john@example.com",
+            "phone_number": "555-123-4567",
+            "appointment_date": "2099-12-31",
+            "appointment_time": "10:00",
+            "reason": "Annual checkup appointment"
+        },
+        {
+            "patient_name": "Mary O'Brien",
+            "patient_email": "mary@example.org",
+            "phone_number": "(800) 555-0199",
+            "appointment_date": "2099-11-15",
+            "appointment_time": "14:30",
+            "reason": "Follow-up consultation visit"
+        },
+        {
+            "patient_name": "Jean-Pierre",
+            "patient_email": "jp@example.net",
+            "phone_number": "212.867.5309",
+            "appointment_date": "2099-10-20",
+            "appointment_time": "09:00",
+            "reason": "Initial consultation meeting"
+        },
+        {
+            "patient_name": "Alice Test",
+            "patient_email": "alice@example.com",
+            "phone_number": "5551234567",
+            "appointment_date": "2099-09-15",
+            "appointment_time": "15:00",
+            "reason": "Regular checkup today"
+        }
+    ]
+    
+    for i, payload in enumerate(valid_payloads, 1):
+        r = create_appointment(payload)
+        if r.status_code != 201:
+            print(f"  ✗ Test {i} FAILED: Valid phone '{payload['phone_number']}' was rejected")
+            print(f"    Status: {r.status_code}")
+            print(f"    Response: {r.text}")
+            return False
+        
+        data = r.json()
+        appt_id = data.get("id")
+        if not isinstance(appt_id, int):
+            print(f"  ✗ Test {i} FAILED: Response missing valid appointment ID")
+            return False
+        
+        print(f"  ✓ Test {i} passed: {payload['phone_number']}")
+    
+    print("  ✓ All existing functionality tests passed")
+    return True
+
+
+def test_phone_number_validation():
+    print("\n[TEST] Phone Number Validation")
+    
+    base_payload = {
+        "patient_name": "Test Patient",
+        "patient_email": "test@example.com",
+        "appointment_date": "2099-12-01",
+        "appointment_time": "11:00",
+        "reason": "Testing phone validation"
+    }
+    
+    valid_phones = [
+        ("555-123-4567", "Standard hyphen format"),
+        ("800-555-0199", "Toll-free with hyphens"),
+        ("212-867-5309", "Famous number with hyphens"),
+        ("999-999-9999", "All nines with hyphens"),
+        ("987-765-4321", "Sequential with hyphens"),
+        
+        ("(555) 123-4567", "Parentheses with space"),
+        ("(800) 555-0199", "Toll-free parentheses with space"),
+        ("(212) 867-5309", "Famous number parentheses with space"),
+        
+        ("(555)123-4567", "Parentheses no space"),
+        ("(800)555-0199", "Toll-free parentheses no space"),
+        ("(212)867-5309", "Famous number parentheses no space"),
+        
+        ("555.123.4567", "Dot separated"),
+        ("800.555.0199", "Toll-free with dots"),
+        ("212.867.5309", "Famous number with dots"),
+        ("999.999.9999", "All nines with dots"),
+        
+        ("5551234567", "No separators"),
+        ("8005550199", "Toll-free no separators"),
+        ("2128675309", "Famous number no separators"),
+        ("9999999999", "All nines no separators"),
+    ]
+    
+    print("\n  Testing valid phone numbers (should accept):")
+    for phone, description in valid_phones:
+        payload = {**base_payload, "phone_number": phone}
+        r = create_appointment(payload)
+        if r.status_code != 201:
+            print(f"    ✗ FAILED: Valid phone '{phone}' ({description}) was rejected")
+            print(f"      Status: {r.status_code}, Response: {r.text}")
+            return False
+        print(f"    ✓ Accepted: {phone} ({description})")
+    
+    invalid_phones = [
+        ("123-45-6789", "SSN format - 9 digits"),
+        ("12-345-6789", "wrong grouping - 9 digits"),
+        ("55-123-4567", "only 9 digits total"),
+        ("555-12-4567", "only 9 digits total"),
+        ("555-123-456", "only 9 digits total"),
+        ("555-123-45678", "11 digits"),
+        ("5555-123-4567", "11 digits"),
+        ("55512345678", "11 digits no separator"),
+        ("555123456", "9 digits no separator"),
+        
+        ("1-555-123-4567", "country code prefix with hyphen"),
+        ("+1-555-123-4567", "plus country code"),
+        ("+44-555-123-4567", "international format"),
+        ("+1 555-123-4567", "plus country code with space"),
+        ("1 555-123-4567", "country code with space"),
+        
+        ("555-123-4567 ext 123", "extension with ext"),
+        ("555-123-4567 x123", "x extension"),
+        ("555-123-4567x123", "x extension no space"),
+        ("555-123-4567,123", "comma extension"),
+        ("555-123-4567 extension 123", "full word extension"),
+        
+        ("ABC-DEF-GHIJ", "all letters"),
+        ("5AB-123-4567", "letters in area code"),
+        ("555-ABC-4567", "letters in exchange"),
+        ("555-123-HELP", "letters in subscriber"),
+        ("555-123-456x", "letter at end"),
+        ("CALL-ME-NOW!", "words"),
+        
+        ("555'-123-4567", "SQL apostrophe"),
+        ("555-123-4567'; DROP TABLE--", "SQL injection"),
+        ("555-123-4567 OR 1=1--", "SQL condition"),
+        ("555'; DROP TABLE appointments--", "SQL in area code"),
+        ("555-123-4567;", "semicolon at end"),
+        ("555-123-4567--", "SQL comment"),
+        
+        ("<script>123-4567", "XSS in area code"),
+        ("555-<script>-4567", "XSS in exchange"),
+        ("555-123-<script>", "XSS in subscriber"),
+        ("<script>5551234567</script>", "XSS wrapped"),
+        ("555-123-4567<script>alert('xss')</script>", "XSS appended"),
+        
+        ("555-123-4567#", "hash at end"),
+        ("555-123-4567*", "asterisk at end"),
+        ("*555-123-4567", "asterisk at start"),
+        ("555#123#4567", "hash instead of separator"),
+        ("555&123&4567", "ampersand separator"),
+        ("555|123|4567", "pipe separator"),
+        ("555$123$4567", "dollar sign"),
+        ("555`123`4567", "backtick"),
+        ("555\\123\\4567", "backslash"),
+        ("555/123/4567", "forward slash"),
+        ("555!123!4567", "exclamation"),
+        ("555?123?4567", "question mark"),
+        ("555=123=4567", "equals sign"),
+        ("555+123+4567", "plus sign"),
+        
+        ("555-123.4567", "mixed hyphen and dot"),
+        ("(555)-123-4567", "parentheses with hyphen after"),
+        ("555.123-4567", "mixed dot and hyphen"),
+        
+        ("", "empty string"),
+        ("   ", "only spaces"),
+        ("---", "only hyphens"),
+        ("...", "only dots"),
+        ("()", "only parentheses"),
+        ("555--4567", "double hyphen"),
+        ("555..123..4567", "double dots"),
+        ("555-123-", "trailing separator"),
+        ("-555-123-4567", "leading separator"),
+        
+        ("555-123-4567\x00", "null byte"),
+        
+        ("055-123-4567", "area code starts with 0"),
+        ("155-123-4567", "area code starts with 1"),
+        ("0551234567", "area code starts with 0, no separator"),
+        ("1551234567", "area code starts with 1, no separator"),
+        
+        ("000-000-0000", "all zeros hyphen"),
+        ("(000) 000-0000", "all zeros parentheses"),
+        ("000.000.0000", "all zeros dots"),
+        ("0000000000", "all zeros no separator"),
+    ]
+    
+    print("\n  Testing invalid phone numbers (should reject with 400):")
+    for phone, description in invalid_phones:
+        payload = {**base_payload, "phone_number": phone}
+        r = create_appointment(payload)
+        if r.status_code != 400:
+            print(f"    ✗ FAILED: Invalid phone '{phone}' ({description}) was accepted")
+            print(f"      Expected: 400, Got: {r.status_code}")
+            return False
+        
+        try:
+            error_data = r.json()
+            error_msg = error_data.get("error", "")
+            
+            if not error_msg:
+                print(f"    ✗ FAILED: No error message for '{phone}' ({description})")
+                return False
+            
+            if any(leak in error_msg.lower() for leak in ["traceback", "exception", "internal", "stack"]):
+                print(f"    ✗ FAILED: Error message leaks internals for '{phone}'")
+                print(f"      Message: {error_msg}")
+                return False
+            
+        except ValueError:
+            print(f"    ✗ FAILED: Invalid JSON response for '{phone}' ({description})")
+            print(f"      Response: {r.text}")
+            return False
+        
+        print(f"    ✓ Rejected: {phone} ({description})")
+    
+    print("\n  ✓ All phone validation tests passed")
+    return True
+
+
+def test_edge_cases():
+    print("\n[TEST] Edge Cases")
+    
+    base_payload = {
+        "patient_name": "Edge Test",
+        "patient_email": "edge@example.com",
+        "appointment_date": "2099-12-01",
+        "appointment_time": "11:00",
+        "reason": "Testing edge cases"
+    }
+    
+    print("\n  Testing type errors:")
+    
+    payload = {**base_payload, "phone_number": None}
+    r = create_appointment(payload)
+    if r.status_code != 400:
+        print(f"    ✗ FAILED: None value should be rejected")
+        return False
+    print(f"    ✓ None value: rejected")
+    
+    whitespace_cases = [
+        (" 555-123-4567", "leading space", True),
+        ("555-123-4567 ", "trailing space", True),
+        (" 555-123-4567 ", "both spaces", True),
+        ("555 -123-4567", "space in middle", False),
+        ("555- 123-4567", "space after separator", False),
+        ("(555) 123 -4567", "extra space", False),
+    ]
+    
+    print("\n  Testing whitespace handling:")
+    for value, description, should_pass in whitespace_cases:
+        payload = {**base_payload, "phone_number": value}
+        r = create_appointment(payload)
+        
+        expected = 201 if should_pass else 400
+        if r.status_code != expected:
+            print(f"    ✗ FAILED: {description}")
+            print(f"      Expected: {expected}, Got: {r.status_code}")
+            print(f"      Value: {repr(value)}")
+            return False
+        
+        status = "accepted" if should_pass else "rejected"
+        print(f"    ✓ {description}: {status}")
+    
+    print("\n  ✓ All edge case tests passed")
+    return True
+
+
+def main():
+    proc = None
+    try:
+        print("="*70)
+        print("PHONE NUMBER VALIDATION CHALLENGE - AUTOMATED CHECKER")
+        print("="*70)
+        
+        print("\n[*] Starting server...")
+        proc = start_server()
+        print("  ✓ Server started successfully")
+        
+        if not test_existing_functionality():
+            print("\n" + "="*70)
+            print("[FAIL] Existing functionality tests failed")
+            print("="*70)
+            stop_server(proc)
+            sys.exit(1)
+        
+        if not test_phone_number_validation():
+            print("\n" + "="*70)
+            print("[FAIL] Phone number validation tests failed")
+            print("="*70)
+            stop_server(proc)
+            sys.exit(1)
+        
+        if not test_edge_cases():
+            print("\n" + "="*70)
+            print("[FAIL] Edge case tests failed")
+            print("="*70)
+            stop_server(proc)
+            sys.exit(1)
+        
+        print("\n" + "="*70)
+        print("[SUCCESS] ALL TESTS PASSED!")
+        print("="*70)
+        
+        if FLAG.exists():
+            print("\n[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            stop_server(proc)
+            sys.exit(0)
+        else:
+            print("\n[WARN] All tests passed but flag file missing")
+            stop_server(proc)
+            sys.exit(1)
+    
+    except Exception as e:
+        print(f"\n[ERROR] Exception during checking: {e}")
+        if proc:
+            stop_server(proc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

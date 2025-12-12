@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -e
+
+chmod 4711 "/challenge/checker" 2>/dev/null || true
+
+rm -f "/challenge/.init" 2>/dev/null || true

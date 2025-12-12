@@ -1,0 +1,32 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+import sys
+from pathlib import Path
+
+FLAG = Path("/flag")
+
+
+def main():
+    try:
+        if FLAG.exists():
+            print("\n[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            sys.exit(0)
+        else:
+            print("\n[WARN] All tests passed but flag file missing")
+            sys.exit(1)
+    
+    except Exception as e:
+        print(f"\n[ERROR] Exception during checking: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

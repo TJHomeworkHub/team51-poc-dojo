@@ -1,0 +1,218 @@
+#!/opt/pwn.college/python
+"""
+checker
+
+Exit codes:
+ - 0 success
+ - 1 failure
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+import requests
+import os
+from pathlib import Path
+
+ROOT = Path("/challenge")
+APP = ROOT / "appointment_api.py"
+FLAG = Path("/flag")
+SERVER_URL = "http://127.0.0.1:5000"
+START_TIMEOUT = 8.0  # seconds
+
+
+def start_server():
+    proc = subprocess.Popen([sys.executable, str(APP)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.time() + START_TIMEOUT
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{SERVER_URL}/", timeout=1.0)
+            if r.status_code == 200:
+                return proc
+        except requests.RequestException:
+            pass
+        time.sleep(0.2)
+    proc.kill()
+    stdout, stderr = proc.communicate(timeout=1)
+    print("Server failed to start. stdout/stderr:\n", stdout.decode(errors="ignore"), stderr.decode(errors="ignore"))
+    raise RuntimeError("Server failed to start")
+
+
+def stop_server(proc: subprocess.Popen):
+    proc.terminate()
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+# Helpers
+def create_appointment(payload: dict) -> requests.Response:
+    return requests.post(f"{SERVER_URL}/api/appointments", json=payload, timeout=5.0)
+
+
+def get_appointment(aid: int) -> requests.Response:
+    return requests.get(f"{SERVER_URL}/api/appointments/{aid}", timeout=5.0)
+
+
+def search_appointments(name: str) -> requests.Response:
+    return requests.get(f"{SERVER_URL}/api/appointments/search", params={"name": name}, timeout=5.0)
+
+
+def add_notes(aid: int, notes: str) -> requests.Response:
+    return requests.post(f"{SERVER_URL}/api/appointments/{aid}/notes", json={"notes": notes}, timeout=5.0)
+
+
+# Tests
+def test_existing_functionality():
+    payload = {
+        "patient_name": "Jane Example",
+        "patient_email": "jane@example.com",
+        "phone_number": "555-123-4567",
+        "appointment_date": "2099-12-31",
+        "appointment_time": "10:00",
+        "reason": "Existing functionality smoke test"
+    }
+    r = create_appointment(payload)
+    if r.status_code != 201:
+        print("FAILED: Creating a valid appointment should return 201. Got:", r.status_code, r.text)
+        return False
+    data = r.json()
+    appt_id = data.get("id")
+    if not isinstance(appt_id, int):
+        print("FAILED: Response id missing or not int:", data)
+        return False
+
+    # Retrieve
+    r = get_appointment(appt_id)
+    if r.status_code != 200:
+        print("FAILED: Retrieving appointment should return 200. Got:", r.status_code, r.text)
+        return False
+    obj = r.json()
+    if obj.get("patient_email") != payload["patient_email"]:
+        print("FAILED: Retrieved email mismatch:", obj.get("patient_email"))
+        return False
+
+    # Search
+    r = search_appointments("Jane")
+    if r.status_code != 200:
+        print("FAILED: Search should return 200. Got:", r.status_code, r.text)
+        return False
+    results = r.json().get("results", [])
+    if not any(item.get("id") == appt_id for item in results):
+        print("FAILED: Search results do not include created appointment")
+        return False
+
+    # Add notes
+    r = add_notes(appt_id, "Smoke test note.")
+    if r.status_code != 200:
+        print("FAILED: Adding notes should return 200. Got:", r.status_code, r.text)
+        return False
+    note_payload = r.json()
+    if note_payload.get("notes") != "Smoke test note.":
+        print("FAILED: Notes content mismatch")
+        return False
+
+    return True
+
+
+def test_email_validation():
+    base = {
+        "patient_name": "Email Tester",
+        "phone_number": "555-222-3333",
+        "appointment_date": "2099-12-01",
+        "appointment_time": "11:00",
+        "reason": "Testing email validation"
+    }
+
+    valid_emails = [
+        "user@example.com",
+        "firstname.lastname@company.co.uk",
+        "user+tag@example.co",
+        "simple-mailbox@subdomain.example.com",
+        "user@xn--d1acpjx3f.xn--p1ai",
+    ]
+
+    invalid_emails = [
+        ("notanemail", "missing @ and domain"),
+        ("@example.com", "missing local part"),
+        ("user@", "missing domain"),
+        ("user+<script>@example.com", "xss-ish local part"),
+        ("user@example..com", "consecutive dots in domain"),
+        ("user..name@example.com", "consecutive dots in local part"),
+        ("user.@example.com", "local part ends with dot"),
+        (".user@example.com", "local part starts with dot"),
+        ("user@exa_mple.com", "underscore in domain label"),
+        ("user@example.c", "TLD too short"),
+        ("a" * 101 + "@example.com", "email too long"),
+        ("user@localhost", "no dot in domain"),
+    ]
+
+    # Accept valid emails
+    for em in valid_emails:
+        payload = {**base, "patient_email": em}
+        r = create_appointment(payload)
+        if r.status_code != 201:
+            print(f"FAILED: valid email '{em}' was rejected (status {r.status_code}) - {r.text}")
+            return False
+
+    # Reject invalid emails
+    for em, reason in invalid_emails:
+        payload = {**base, "patient_email": em}
+        r = create_appointment(payload)
+        if r.status_code != 400:
+            print(f"FAILED: invalid email '{em}' ({reason}) was accepted (status {r.status_code})")
+            return False
+        # Ensure error message is user-facing and not leaking internals
+        try:
+            j = r.json()
+            err = j.get("error", "")
+            if not err or "traceback" in err.lower() or "exception" in err.lower():
+                print(f"FAILED: error message for '{em}' is missing or leaking internals: {j}")
+                return False
+        except ValueError:
+            print(f"FAILED: invalid response body for rejected email '{em}': {r.text}")
+            return False
+
+    return True
+
+
+def main():
+    proc = None
+    try:
+        proc = start_server()
+        ok = test_existing_functionality()
+        if not ok:
+            print("[FAIL] Existing functionality tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        ok = test_email_validation()
+        if not ok:
+            print("[FAIL] Email validation tests failed")
+            stop_server(proc)
+            sys.exit(1)
+
+        # All tests passed
+        if FLAG.exists():
+            print("[SUCCESS] All tests passed!")
+            print("[*] Here's your flag:")
+            print(FLAG.read_text().strip())
+            stop_server(proc)
+            sys.exit(0)
+        else:
+            print("[WARN] All tests passed but flag file missing")
+            stop_server(proc)
+            sys.exit(1)
+
+    except Exception as e:
+        print("Exception during checking:", e)
+        if proc:
+            stop_server(proc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
